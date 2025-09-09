@@ -1,0 +1,158 @@
+---
+title: "NHL"
+author: "Yufei Zou"
+date: "2025-09-01"
+output: html_document
+---
+
+```{r}
+setwd("/Users/yufeizou/NHL")
+
+library(readr)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(ggplot2)
+library(mgcv)
+
+files <- c(
+  "NHL_2009_Draft_Full_Stats.csv",
+  "NHL_2010_Draft_Full_Stats.csv",
+  "NHL_2011_Draft_Full_Stats.csv",
+  "NHL_2012_Draft_Full_Stats.csv",
+  "NHL_2013_Draft_Full_Stats.csv",
+  "NHL_2014_Draft_Full_Stats.csv",
+  "NHL_2015_Draft_Full_Stats.csv",
+  "NHL_2016_Draft_Full_Stats.csv",
+  "NHL_2017_Draft_Full_Stats.csv",
+  "NHL_2018_Draft_Full_Stats (2).csv"
+)
+
+#Data preparation
+#"MM:SS" or "H:MM:SS" to minutes
+parse_toi_to_minutes <- function(x) {
+  if (is.na(x) || x == "") return(0)
+  s <- as.character(x)
+  parts <- str_split(s, ":", simplify = TRUE)
+  nums  <- suppressWarnings(as.numeric(parts))
+  nums  <- nums[!is.na(nums)]
+  if (length(nums) == 2) {        # MM:SS
+    return(nums[1] + nums[2] / 60)
+  } else if (length(nums) == 3) { # H:MM:SS
+    return(60 * nums[1] + nums[2] + nums[3] / 60)
+  } else if (length(nums) == 1) { # already numeric minutes
+    return(nums[1])
+  } else {
+    return(0)
+  }
+}
+
+toi_cols <- paste0("TOIYr", 1:7)
+
+read_one <- function(path) {
+  df <- read_csv(path, show_col_types = FALSE)
+  df$source_file <- basename(path)
+  df
+}
+raw <- map(files, read_one) |> bind_rows()
+
+stopifnot("Selection" %in% names(raw))
+missing_toi <- setdiff(toi_cols, names(raw))
+if (length(missing_toi) > 0) {
+  stop("Missing TOI columns: ", paste(missing_toi, collapse = ", "))
+}
+
+for (c in toi_cols) {
+  raw[[paste0(c, "_min")]] <- vapply(raw[[c]], parse_toi_to_minutes, numeric(1))
+}
+toi_min_cols <- paste0(toi_cols, "_min")
+
+dat <- raw |>
+  mutate(
+    Selection   = suppressWarnings(as.integer(Selection)),
+    TOI_sum_min = rowSums(across(all_of(toi_min_cols)), na.rm = TRUE)
+  ) |>
+  filter(!is.na(Selection), !is.na(TOI_sum_min))
+```
+
+
+# using GAM
+```{r}
+k<-40 #of basis functions
+m<-2 #order
+g0 <- gam(dat$TOI_sum_min ~ s(dat$Selection, bs="cr", k=k, m=m),
+          data=dat, method="GCV.Cp") #cubic regression spline
+plot(g0, shade=TRUE, main="Smooth effect of Selection on TOI")
+```
+
+the standard mgcv GAM plot of the smooth term for Selection predicting total TOI. The curve starts very high for top draft picks, meaning early selections contributr thr most to TOI
+
+# Using smoothCon(), cubic regression spline
+X: a design matrix X that maps coefficients to fitted values
+S: penalty matrices 
+
+```{r}
+X <- dat$Selection
+y <- dat$TOI_sum_min
+B <- smoothCon(s(X, bs="cr", k=k, m=m),
+               data=data.frame(X=X), absorb.cons=FALSE)[[1]]
+X <- B$X
+S <- B$S[[1]] * B$S.scale[1]
+```
+
+```{r}
+mc <- mono.con(B$xp,upper=FALSE)
+Ain <- mc$A
+bin <- mc$b
+```
+
+```{r}
+q  <- ncol(X)
+p0 <- seq(0, -1, length.out = q)
+G <- list(
+  X   = X,
+  S   = S,          # pass the list as returned by smoothCon
+  y   = dat$TOI_sum_min,
+  w   = rep(1, nrow(dat)),
+  sp  = g0$sp,      # reuse smoothing from unconstrained GAM
+  C = matrix(0,0,q),
+  Ain = Ain,
+  bin = bin,
+  p   = p0,
+  off = 0
+)
+beta_hat <- pcls(G)
+```
+
+#LOESS
+```{r}
+library(ggplot2)
+set.seed(1)
+lo <- loess(TOI_sum_min ~ Selection,
+            data = dat,
+            span = 0.35,      
+            degree = 1,       # local linear
+            family = "gaussian",
+            na.action = na.exclude,
+            surface = "direct")
+
+sel_min <- min(dat$Selection, na.rm = TRUE)
+sel_max <- max(dat$Selection, na.rm = TRUE)
+grid    <- data.frame(Selection = sel_min:sel_max)
+
+pred <- grid |>
+  mutate(Predicted_TOI_sum_minutes_Yrs1to7 = as.numeric(predict(lo, newdata = grid)))
+
+
+p <- ggplot() +
+  geom_point(data = dat, aes(Selection, TOI_sum_min), alpha = 0.25, size = 1) +
+  geom_line(data = pred, aes(Selection, Predicted_TOI_sum_minutes_Yrs1to7), linewidth = 1) +
+  labs(
+    title = "LOESS: TOI  vs Selection\nNHL Draft 2009–2018",
+    x = "Selection (overall pick number)",
+    y = "Sum of TOI (minutes)"
+  ) +
+  theme_minimal(base_size = 12)
+p
+```
+
