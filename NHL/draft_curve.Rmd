@@ -6,7 +6,7 @@ output: html_document
 ---
 
 ```{r}
-setwd("/Users/yufeizou/NHL")
+setwd("/Users/yufeizou/draft-research/NHL")
 
 library(readr)
 library(dplyr)
@@ -95,32 +95,61 @@ S: penalty matrices
 X <- dat$Selection
 y <- dat$TOI_sum_min
 B <- smoothCon(s(X, bs="cr", k=k, m=m),
-               data=data.frame(X=X), absorb.cons=FALSE)[[1]]
-X <- B$X
-S <- B$S[[1]] * B$S.scale[1]
+               data=data.frame(X=X), absorb.cons=TRUE)[[1]]
+xp <- B$xp
+plot(g0, shade = TRUE, main = " Smooth effect of Selection on TOI")
+abline(v = xp, lty = 3)
+rug(xp, ticksize = 0.05, side = 3)
+xp
+
 ```
 
 ```{r}
-mc <- mono.con(B$xp,upper=FALSE)
+plot(g0, shade = TRUE, main = "Smooth effect of Selection on TOI")
+abline(v = xp, lty = 3)
+
+# Label every 5th xp along the top axis
+idx <- seq(1, length(xp), by = 5)
+axis(3, at = xp[idx], labels = round(xp[idx]), las = 2, cex.axis = 0.7)
+axis(3, at = xp, labels = round(xp), las = 2, cex.axis = 0.5)
+
+```
+
+```{r}
+k <- 40
+m <- 2
+X <- dat$Selection
+y <- dat$TOI_sum_min
+B <- smoothCon(s(X, bs="cr", k=k, m=m),
+               data=data.frame(X=X), absorb.cons=FALSE)[[1]]
+xp <- B$xp
+
+Xmat <- B$X
+```
+
+
+```{r}
+mc <- mono.con(xp,upper=FALSE)
 Ain <- mc$A
 bin <- mc$b
 ```
 
 ```{r}
-q  <- ncol(X)
-p0 <- seq(0, -1, length.out = q)
+q  <- ncol(Xmat)
 G <- list(
-  X   = X,
-  S   = S,          # pass the list as returned by smoothCon
+  X   = Xmat,
+  S   = B$S,          # pass the list as returned by smoothCon
   y   = dat$TOI_sum_min,
   w   = rep(1, nrow(dat)),
   sp  = g0$sp,      # reuse smoothing from unconstrained GAM
-  C = matrix(0,0,q),
+  C = B$C,
+  p   = rep(0,q),
   Ain = Ain,
   bin = bin,
-  p   = p0,
   off = 0
+  
 )
+
 beta_hat <- pcls(G)
 ```
 
@@ -130,7 +159,7 @@ library(ggplot2)
 set.seed(1)
 lo <- loess(TOI_sum_min ~ Selection,
             data = dat,
-            span = 0.35,      
+            span = 0.2,      
             degree = 1,       # local linear
             family = "gaussian",
             na.action = na.exclude,
@@ -155,4 +184,355 @@ p <- ggplot() +
   theme_minimal(base_size = 12)
 p
 ```
+## Choose the best span(fraction of data points used to fit each local regression)
+use k-fold cross-validation, compute MSE for each span
+```{r}
+spans <- seq(0.1, 0.7, by = 0.05)
+set.seed(42)         
+K <- 5
+fold_id <- sample(rep(1:K, length.out = nrow(dat)))
+#for each span, fit LOESS on training folds and predict on the held-out fold
+cv_mse <- sapply(spans, function(s) {
+  mse <- numeric(K)
+  for (k in 1:K) {
+    train <- dat[fold_id != k, ]
+    test  <- dat[fold_id == k, ]
+    
+    fit <- loess(
+      TOI_sum_min ~ Selection, data = train,
+      span = s, degree = 1,
+      family = "symmetric",   # robust to outliers
+      na.action = na.exclude,
+      surface = "direct"
+    )
+    
+    pred <- predict(fit, newdata = test)
+    mse[k] <- mean((test$TOI_sum_min - pred)^2, na.rm = TRUE)
+  }
+  mean(mse)
+})
+best_span <- spans[which.min(cv_mse)]
+best_span
+
+```
+
+```{r}
+plot(spans, cv_mse, type = "b", pch = 19,
+     xlab = "Span", ylab = "Cross-validated MSE",
+     main = "Choosing LOESS span by CV")
+abline(v = best_span, col = "red", lty = 2)
+
+```
+
+## Repeat the above but have sum of TOIYr go from 1 to 7
+```{r}
+setwd("/Users/yufeizou/draft-research/NHL")
+
+library(readr)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(ggplot2)
+library(mgcv)
+
+files <- c(
+  "NHL_2009_Draft_Full_Stats.csv",
+  "NHL_2010_Draft_Full_Stats.csv",
+  "NHL_2011_Draft_Full_Stats.csv",
+  "NHL_2012_Draft_Full_Stats.csv",
+  "NHL_2013_Draft_Full_Stats.csv",
+  "NHL_2014_Draft_Full_Stats.csv",
+  "NHL_2015_Draft_Full_Stats.csv",
+  "NHL_2016_Draft_Full_Stats.csv",
+  "NHL_2017_Draft_Full_Stats.csv",
+  "NHL_2018_Draft_Full_Stats (2).csv"
+)
+
+#Data preparation
+#"MM:SS" or "H:MM:SS" to minutes
+parse_toi_to_minutes <- function(x) {
+  if (is.na(x) || x == "") return(0)
+  s <- as.character(x)
+  parts <- str_split(s, ":", simplify = TRUE)
+  nums  <- suppressWarnings(as.numeric(parts))
+  nums  <- nums[!is.na(nums)]
+  if (length(nums) == 2) {        # MM:SS
+    return(nums[1] + nums[2] / 60)
+  } else if (length(nums) == 3) { # H:MM:SS
+    return(60 * nums[1] + nums[2] + nums[3] / 60)
+  } else if (length(nums) == 1) { # already numeric minutes
+    return(nums[1])
+  } else {
+    return(0)
+  }
+}
+
+toi_cols <- paste0("TOIYr", 1:5)
+
+read_one <- function(path) {
+  df <- read_csv(path, show_col_types = FALSE)
+  df$source_file <- basename(path)
+  df
+}
+raw <- map(files, read_one) |> bind_rows()
+
+stopifnot("Selection" %in% names(raw))
+missing_toi <- setdiff(toi_cols, names(raw))
+if (length(missing_toi) > 0) {
+  stop("Missing TOI columns: ", paste(missing_toi, collapse = ", "))
+}
+
+for (c in toi_cols) {
+  raw[[paste0(c, "_min")]] <- vapply(raw[[c]], parse_toi_to_minutes, numeric(1))
+}
+toi_min_cols <- paste0(toi_cols, "_min")
+
+dat <- raw |>
+  mutate(
+    Selection   = suppressWarnings(as.integer(Selection)),
+    TOI_sum_min = rowSums(across(all_of(toi_min_cols)), na.rm = TRUE)
+  ) |>
+  filter(!is.na(Selection), !is.na(TOI_sum_min))
+
+k<-40 #of basis functions
+m<-2 #order
+g0 <- gam(dat$TOI_sum_min ~ s(dat$Selection, bs="cr", k=k, m=m),
+          data=dat, method="GCV.Cp") #cubic regression spline
+plot(g0, shade=TRUE, main="Smooth effect of Selection on TOI")
+
+X <- dat$Selection
+y <- dat$TOI_sum_min
+B <- smoothCon(s(X, bs="cr", k=k, m=m),
+               data=data.frame(X=X), absorb.cons=TRUE)[[1]]
+xp <- B$xp
+plot(g0, shade = TRUE, main = " Smooth effect of Selection on TOI(1-5)")
+abline(v = xp, lty = 3)
+rug(xp, ticksize = 0.05, side = 3)
+xp
+
+# Label every 5th xp along the top axis
+idx <- seq(1, length(xp), by = 5)
+axis(3, at = xp[idx], labels = round(xp[idx]), las = 2, cex.axis = 0.7)
+axis(3, at = xp, labels = round(xp), las = 2, cex.axis = 0.5)
+
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(mgcv)
+# --- assumes you already have `raw` and parse_toi_to_minutes() defined ---
+
+# 1) Build summed outcomes for Yrs 1–5 and 1–7 (in minutes)
+toi_cols_1to5 <- paste0("TOIYr", 1:5)
+toi_cols_1to7 <- paste0("TOIYr", 1:7)
+
+# ensure *_min columns exist (safe to re-create)
+for (c in union(toi_cols_1to5, toi_cols_1to7)) {
+  raw[[paste0(c, "_min")]] <- vapply(raw[[c]], parse_toi_to_minutes, numeric(1))
+}
+
+dat <- raw |>
+  mutate(
+    Selection = suppressWarnings(as.integer(Selection)),
+    TOI_sum_min_1to5 = rowSums(across(all_of(paste0(toi_cols_1to5, "_min"))), na.rm = TRUE),
+    TOI_sum_min_1to7 = rowSums(across(all_of(paste0(toi_cols_1to7, "_min"))), na.rm = TRUE)
+  ) |>
+  filter(!is.na(Selection), !is.na(TOI_sum_min_1to5), !is.na(TOI_sum_min_1to7))
+
+# 2) Fit GAMs (same basis settings for comparability)
+k <- 40; m <- 2
+g_1to5 <- gam(TOI_sum_min_1to5 ~ s(Selection, bs = "cr", k = k, m = m),
+              data = dat, method = "GCV.Cp")
+g_1to7 <- gam(TOI_sum_min_1to7 ~ s(Selection, bs = "cr", k = k, m = m),
+              data = dat, method = "GCV.Cp")
+
+# 3) Make a common prediction grid over observed Selection
+grid <- data.frame(Selection = seq(min(dat$Selection), max(dat$Selection)))
+
+p_1to5 <- predict(g_1to5, newdata = grid, se.fit = TRUE)
+p_1to7 <- predict(g_1to7, newdata = grid, se.fit = TRUE)
+
+pred_df <- bind_rows(
+  tibble(Selection = grid$Selection,
+         fit = as.numeric(p_1to5$fit),
+         se  = as.numeric(p_1to5$se.fit),
+         curve = "TOI years 1–5"),
+  tibble(Selection = grid$Selection,
+         fit = as.numeric(p_1to7$fit),
+         se  = as.numeric(p_1to7$se.fit),
+         curve = "TOI years 1–7")
+) |>
+  mutate(lo = fit - 2*se, hi = fit + 2*se)
+
+# (optional) show per-pick means as faint guide points
+by_pick <- dat |>
+  group_by(Selection) |>
+  summarise(mean_1to5 = mean(TOI_sum_min_1to5, na.rm = TRUE),
+            mean_1to7 = mean(TOI_sum_min_1to7, na.rm = TRUE),
+            .groups = "drop") |>
+  tidyr::pivot_longer(cols = starts_with("mean_"),
+                      names_to = "curve",
+                      values_to = "mean_val") |>
+  mutate(curve = dplyr::recode(curve,
+                               "mean_1to5" = "TOI years 1–5",
+                               "mean_1to7" = "TOI years 1–7"))
+
+# 4) Plot both curves with 95% bands and a legend
+ggplot() +
+  # optional: per-pick means
+  geom_point(data = by_pick, aes(Selection, mean_val, color = curve),
+             alpha = 0.25, size = 0.6) +
+  # ribbons first so lines are on top
+  geom_ribbon(data = pred_df, aes(x = Selection, ymin = lo, ymax = hi, fill = curve),
+              alpha = 0.15, inherit.aes = FALSE) +
+  geom_line(data = pred_df, aes(Selection, fit, color = curve), linewidth = 1) +
+  labs(
+    title = "GAM comparison: TOI (Years 1–5) vs TOI (Years 1–7) by Selection",
+    x = "Selection (overall pick number)",
+    y = "Sum of TOI minutes",
+    color = "Curve",
+    fill  = "Curve"
+  ) +
+  theme_minimal(base_size = 12)
+
+```
+
+
+## rescale-- make the total sum of fitted values matches
+```{r}
+total_by_curve <- pred_df |>
+  group_by(curve) |>
+  summarise(total = sum(fit, na.rm = TRUE), .groups = "drop")
+
+total_by_curve
+
+# Get totals
+tot_1to5 <- total_by_curve$total[total_by_curve$curve == "TOI years 1–5"]
+tot_1to7 <- total_by_curve$total[total_by_curve$curve == "TOI years 1–7"]
+
+scale_factor <- tot_1to7 / tot_1to5
+scale_factor
+
+pred_df <- pred_df |>
+  mutate(
+    fit_scaled = ifelse(curve == "TOI years 1–5", fit * scale_factor, fit),
+    se_scaled  = ifelse(curve == "TOI years 1–5", se  * scale_factor, se),
+    lo_scaled  = fit_scaled - 2 * se_scaled,
+    hi_scaled  = fit_scaled + 2 * se_scaled
+  )
+ggplot() +
+  geom_ribbon(data = pred_df, aes(x = Selection, ymin = lo_scaled, ymax = hi_scaled, fill = curve),
+              alpha = 0.15) +
+  geom_line(data = pred_df, aes(Selection, fit_scaled, color = curve), linewidth = 1) +
+  labs(
+    title = "Rescaled GAM comparison: TOI (Years 1–5 vs 1–7) by Selection",
+    subtitle = "Curves rescaled so their total sums match",
+    x = "Selection (overall pick number)",
+    y = "Rescaled Sum of TOI minutes",
+    color = "Curve",
+    fill  = "Curve"
+  ) +
+  theme_minimal(base_size = 12)
+
+```
+
+## use quantile regression growth curves
+```{r}
+library(quantregGrowth)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# --- Choose years 1–7 here. I
+dat_q <- dat |>
+  transmute(Selection = as.numeric(dat$Selection),
+            TOI = dat$TOI_sum_min_1to7) |>
+  filter(!is.na(Selection), !is.na(TOI))
+
+# --- Fit median & 90th percentile with a monotone-decreasing smooth in Selection
+fit_qr <- gcrq(
+  TOI ~ ps(Selection, monotone = -1),   # -1 => non-increasing in Selection
+  data = dat_q,
+  tau  = c(0.5, 0.9)                    # median and 90th
+)
+
+# --- Predict on an integer grid of picks
+sel_grid <- data.frame(Selection = seq(min(dat_q$Selection), max(dat_q$Selection)))
+pred_mat <- predict(fit_qr, newdata = sel_grid)   # matrix: columns per tau
+colnames(pred_mat) <- paste0("tau", c("50","90"))
+pred_long <- cbind(sel_grid, as.data.frame(pred_mat)) |>
+  pivot_longer(starts_with("tau"), names_to = "Quantile", values_to = "Predicted")
+
+# --- Plot raw points + quantile curves
+ggplot(dat_q, aes(Selection, TOI)) +
+  geom_point(alpha = 0.15, size = 0.7) +
+  geom_line(data = pred_long, aes(Selection, Predicted, color = Quantile), linewidth = 1.2) +
+  scale_color_manual(values = c("tau50" = "#1f77b4", "tau90" = "#ff7f0e"),
+                     labels = c("Median (50th)", "90th percentile")) +
+  labs(title = "Quantile Regression Growth Curves (quantregGrowth)",
+       subtitle = "TOI vs Selection — monotone decreasing smooth",
+       x = "Selection (overall pick number)", y = "TOI (minutes)", color = "Curve") +
+  theme_minimal(base_size = 12)
+
+```
+
+```{r}
+# install.packages("quantregGrowth")
+library(quantregGrowth)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Choose outcome (years 1–7 here; change to _1to5 if needed)
+dat_q <- dat |>
+  transmute(
+    Selection = as.numeric(Selection),
+    TOI = TOI_sum_min_1to7
+  ) |>
+  filter(!is.na(Selection), !is.na(TOI))
+
+# Fit quantile regression growth curves for τ = 0.1 ... 0.9
+taus <- seq(0.1, 0.9, by = 0.1)
+
+fit_qr <- gcrq(
+  TOI ~ ps(Selection, monotone = -1),   # monotone decreasing smooth
+  data = dat_q,
+  tau  = taus
+)
+
+#  Predict on integer grid of selections
+sel_grid <- data.frame(Selection = seq(min(dat_q$Selection), max(dat_q$Selection)))
+pred_mat <- predict(fit_qr, newdata = sel_grid)
+
+# Rename columns q10, q20, ..., q90
+colnames(pred_mat) <- paste0("q", formatC(taus * 100, width = 2, flag = "0"))
+
+# Long format for plotting
+pred_long <- cbind(sel_grid, as.data.frame(pred_mat)) |>
+  pivot_longer(starts_with("q"), names_to = "Quantile", values_to = "Predicted") |>
+  mutate(
+    tau = as.numeric(sub("q", "", Quantile)) / 100,
+    Quantile = factor(Quantile, levels = paste0("q", formatC(taus * 100, width = 2, flag = "0")))
+  )
+
+# Plot: raw points + quantile curves
+ggplot(dat_q, aes(Selection, TOI)) +
+  geom_point(alpha = 0.12, size = 0.6) +
+  geom_line(data = pred_long,
+            aes(Selection, Predicted, color = Quantile),
+            linewidth = 1) +
+  scale_color_viridis_d(name = "Quantile (τ)") +
+  labs(
+    title = "Quantile Regression Growth Curves (τ = 0.1 … 0.9)",
+    subtitle = "quantregGrowth::gcrq with monotone decreasing P-spline",
+    x = "Selection (overall pick number)",
+    y = "TOI (minutes)"
+  ) +
+  theme_minimal(base_size = 12)
+
+```
+
+
 
