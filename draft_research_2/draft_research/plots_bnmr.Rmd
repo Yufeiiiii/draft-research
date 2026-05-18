@@ -1,0 +1,227 @@
+---
+title: "summarize_plots"
+author: "Yufei Zou"
+date: "2026-04-15"
+output: pdf_document
+---
+
+```{r}
+dat <- read.csv("NHL_2009_2018_combined_cleaned.csv",stringsAsFactors = FALSE)
+dat <- dat %>% arrange(Selection)
+library(bnmr)
+fit_GP <- bnmr(
+    y = dat$GP_sum,
+    x = dat$Selection,
+    M = 20,
+    niter = 3000,
+    nburn = 1500,
+    nthin = 1,
+    direction = "decreasing",
+    priors = list(mu0 = 0.5, phi0 = 20, intsd = 0.4715247)
+  )
+
+fit_TOI <- bnmr(
+    y = dat$TOI_sum_min,
+    x = dat$Selection,
+    M = 20,
+    niter = 3000,
+    nburn = 1500,
+    nthin = 1,
+    direction = "decreasing",
+    priors = list(mu0 = 0.5, phi0 = 20 , intsd = 0.6232552)
+  )
+
+fit_PS <- bnmr(
+    y = dat$PS_sum,
+    x = dat$Selection,
+    M = 10,
+    niter = 3000,
+    nburn = 1500,
+    nthin = 1,
+    direction = "decreasing",
+    priors = list(mu0 = 0.5, phi0 = 10, intsd = 3.0740209)
+  )
+```
+
+```{r}
+dat2 <- read.csv("draft_pick_wide_GAR_adjusted_2009_2018_GARsum1_7.csv",stringsAsFactors = FALSE)
+dat2 <- dat2 %>%
+  transmute(Year = DraftYr, Selection = DraftOv, GARsum1_7)%>%
+  filter(!is.na(Selection), !is.na(GARsum1_7)) %>%
+  arrange(Selection)
+
+fit_GAR <- bnmr(
+  y = dat2$GARsum1_7,
+  x = dat2$Selection,
+  niter = 1000, nburn = 500, nthin = 2,
+  M = 30,
+  priors = list(mu0 = .5, phi0 = 4, intsd = 1.8832580),
+  direction = "decreasing"
+)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+extract_scaled_curve <- function(fit, model_name, shift_if_negative = FALSE) {
+  curve <- fit$fitted %>%
+    dplyr::select(x, fitted) %>%
+    dplyr::rename(Selection = x) %>%
+    dplyr::group_by(Selection) %>%
+    dplyr::summarise(fitted = mean(fitted), .groups = "drop") %>%
+    dplyr::arrange(Selection)
+
+  fitted_use <- curve$fitted
+
+  if (shift_if_negative && min(fitted_use) < 0) {
+    fitted_use <- fitted_use - min(fitted_use)
+  }
+
+  curve <- curve %>%
+    mutate(
+      fitted_adjusted = fitted_use,
+      fitted_scaled = fitted_adjusted / sum(fitted_adjusted) * 1000,
+      Model = model_name
+    )
+
+  return(curve)
+}
+
+curve_GP  <- extract_scaled_curve(fit_GP,  "GP")
+curve_TOI <- extract_scaled_curve(fit_TOI, "TOI")
+curve_PS  <- extract_scaled_curve(fit_PS,  "PS", shift_if_negative = TRUE)
+curve_GAR <- extract_scaled_curve(fit_GAR, "GAR", shift_if_negative = TRUE)
+
+all_curves <- bind_rows(curve_GP, curve_TOI, curve_PS, curve_GAR)
+
+ggplot(all_curves, aes(x = Selection, y = fitted_scaled, color = Model)) +
+  geom_line(linewidth = 1.1) +
+  labs(
+    title = "BNMR Fitted Curves Scaled to Sum = 1000",
+    subtitle = "PS is shifted upward before scaling because fitted values can be negative",
+    x = "Draft Selection",
+    y = "Scaled fitted value",
+    color = "Metric"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(bnmr)
+
+
+dat <- read.csv("NHL_2009_2018_combined_cleaned.csv", stringsAsFactors = FALSE) %>%
+  arrange(Selection)
+
+dat2 <- read.csv("draft_pick_wide_GAR_adjusted_2009_2018_GARsum1_7.csv", stringsAsFactors = FALSE) %>%
+  transmute(Year = DraftYr, Selection = DraftOv, GARsum) %>%
+  filter(!is.na(Selection), !is.na(GARsum)) %>%
+  arrange(Selection)
+
+# 2. Helper function
+#    - collapses duplicate fitted x values
+#    - optionally shifts curve upward if negative
+#    - scales fitted curve to sum 1000
+#    - applies same transformation to observed y
+
+make_panel_data <- function(fit, data, y_col, model_name, shift_if_negative = FALSE) {
+  
+  # fitted curve from bnmr output
+  curve <- fit$fitted %>%
+    dplyr::select(x, fitted) %>%
+    dplyr::rename(Selection = x) %>%
+    dplyr::group_by(Selection) %>%
+    dplyr::summarise(fitted = mean(fitted), .groups = "drop") %>%
+    dplyr::arrange(Selection)
+  
+  # observed data
+  points <- data %>%
+    dplyr::select(Selection, y = all_of(y_col)) %>%
+    filter(!is.na(Selection), !is.na(y)) %>%
+    arrange(Selection)
+  
+  # transformation setup
+  shift_value <- 0
+  fitted_use <- curve$fitted
+  
+  if (shift_if_negative && min(fitted_use) < 0) {
+    shift_value <- -min(fitted_use)
+    fitted_use <- fitted_use + shift_value
+  }
+  
+  scale_factor <- 1000 / sum(fitted_use)
+  
+  # transformed fitted curve
+  curve_out <- curve %>%
+    mutate(
+      value = (fitted + shift_value) * scale_factor,
+      Outcome = model_name,
+      Type = "Fitted"
+    ) %>%
+    select(Selection, value, Outcome, Type)
+  
+  # transformed observed points
+  points_out <- points %>%
+    mutate(
+      value = (y + shift_value) * scale_factor,
+      Outcome = model_name,
+      Type = "Observed"
+    ) %>%
+    select(Selection, value, Outcome, Type)
+  
+  list(curve = curve_out, points = points_out)
+}
+
+
+panel_GP  <- make_panel_data(fit_GP,  dat,  "GP_sum",      "GP")
+panel_TOI <- make_panel_data(fit_TOI, dat,  "TOI_sum_min", "TOI")
+panel_PS  <- make_panel_data(fit_PS,  dat,  "PS_sum",      "PS", shift_if_negative = TRUE)
+panel_GAR <- make_panel_data(fit_GAR, dat2, "GARsum",      "GAR", shift_if_negative = TRUE)
+
+curve_data <- bind_rows(
+  panel_GP$curve,
+  panel_TOI$curve,
+  panel_PS$curve,
+  panel_GAR$curve
+)
+
+point_data <- bind_rows(
+  panel_GP$points,
+  panel_TOI$points,
+  panel_PS$points,
+  panel_GAR$points
+)
+
+
+```
+
+```{r}
+ggplot() +
+  geom_point(
+    data = point_data,
+    aes(x = Selection, y = value),
+    alpha = 0.45,
+    size = 1.2
+  ) +
+  geom_line(
+    data = curve_data,
+    aes(x = Selection, y = value),
+    linewidth = 1.1
+  ) +
+  facet_wrap(~ Outcome, scales = "free_y", ncol = 2) +
+  labs(
+    title = "BNMR Fitted Draft Curves with Observed Data",
+    subtitle = "Each fitted curve is scaled to sum to 1000; PS is shifted upward before scaling",
+    x = "Draft Selection",
+    y = "Scaled value"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold")
+  )
+```
+

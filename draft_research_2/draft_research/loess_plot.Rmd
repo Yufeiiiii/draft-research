@@ -1,0 +1,206 @@
+---
+title: "Loess_plot"
+author: "Yufei Zou"
+date: "2026-04-17"
+output: pdf_document
+---
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(stringr)
+
+```
+
+```{r}
+set.seed(1)
+dat <- read.csv("NHL_2009_2018_combined_cleaned.csv",stringsAsFactors = FALSE)
+dat <- dat %>% arrange(Selection)
+lo <- loess(dat$GP_sum ~ Selection,
+            data = dat,
+            span = 0.45,      
+            degree = 1,       # local linear
+            family = "gaussian",
+            na.action = na.exclude,
+            surface = "direct")
+
+sel_min <- min(dat$Selection, na.rm = TRUE)
+sel_max <- max(dat$Selection, na.rm = TRUE)
+grid    <- data.frame(Selection = sel_min:sel_max)
+
+pred <- grid |>
+  mutate(Predicted_GP_sum_Yrs1to7 = as.numeric(predict(lo, newdata = grid)))
+
+
+p <- ggplot() +
+  geom_point(data = dat, aes(Selection, GP_sum), alpha = 0.25, size = 1) +
+  geom_line(data = pred, aes(Selection, Predicted_GP_sum_Yrs1to7), linewidth = 1) +
+  labs(
+    title = "LOESS: GP  vs Selection\nNHL Draft 2009–2018",
+    x = "Selection (overall pick number)",
+    y = "Sum of GP"
+  ) +
+  theme_minimal(base_size = 12)
+p
+```
+
+```{r}
+set.seed(1)
+dat <- read.csv("NHL_2009_2018_combined_cleaned.csv",stringsAsFactors = FALSE)
+dat <- dat %>% arrange(Selection)
+lo <- loess(dat$TOI_sum_min ~ Selection,
+            data = dat,
+            span = 0.1,      
+            degree = 1,       # local linear
+            family = "gaussian",
+            na.action = na.exclude,
+            surface = "direct")
+
+sel_min <- min(dat$Selection, na.rm = TRUE)
+sel_max <- max(dat$Selection, na.rm = TRUE)
+grid    <- data.frame(Selection = sel_min:sel_max)
+
+pred <- grid |>
+  mutate(Predicted_TOI_sum_minutes_Yrs1to7 = as.numeric(predict(lo, newdata = grid)))
+
+
+p <- ggplot() +
+  geom_point(data = dat, aes(Selection, TOI_sum_min), alpha = 0.25, size = 1) +
+  geom_line(data = pred, aes(Selection, Predicted_TOI_sum_minutes_Yrs1to7), linewidth = 1) +
+  labs(
+    title = "LOESS: TOI  vs Selection\nNHL Draft 2009–2018",
+    x = "Selection (overall pick number)",
+    y = "Sum of TOI (minutes)"
+  ) +
+  theme_minimal(base_size = 12)
+p
+```
+
+```{r}
+set.seed(1)
+dat <- read.csv("NHL_2009_2018_combined_cleaned.csv",stringsAsFactors = FALSE)
+dat <- dat %>% arrange(Selection)
+lo <- loess(dat$PS_sum ~ Selection,
+            data = dat,
+            span = 0.1,      
+            degree = 1,       # local linear
+            family = "gaussian",
+            na.action = na.exclude,
+            surface = "direct")
+
+sel_min <- min(dat$Selection, na.rm = TRUE)
+sel_max <- max(dat$Selection, na.rm = TRUE)
+grid    <- data.frame(Selection = sel_min:sel_max)
+
+pred <- grid |>
+  mutate(Predicted_PS_sum_Yrs1to7 = as.numeric(predict(lo, newdata = grid)))
+
+
+p <- ggplot() +
+  geom_point(data = dat, aes(Selection, PS_sum), alpha = 0.25, size = 1) +
+  geom_line(data = pred, aes(Selection, Predicted_PS_sum_Yrs1to7), linewidth = 1) +
+  labs(
+    title = "LOESS: PS  vs Selection\nNHL Draft 2009–2018",
+    x = "Selection (overall pick number)",
+    y = "Sum of PS"
+  ) +
+  theme_minimal(base_size = 12)
+p
+```
+
+```{r}
+set.seed(1)
+dat <- read.csv("NHL_2009_2018_combined_cleaned.csv",stringsAsFactors = FALSE)
+dat <- dat %>% arrange(Selection)
+lo <- loess(dat$PS_sum ~ Selection,
+            data = dat,
+            span = 0.1,      
+            degree = 1,       # local linear
+            family = "gaussian",
+            na.action = na.exclude,
+            surface = "direct")
+
+sel_min <- min(dat$Selection, na.rm = TRUE)
+sel_max <- max(dat$Selection, na.rm = TRUE)
+grid    <- data.frame(Selection = sel_min:sel_max)
+
+pred <- grid |>
+  mutate(Predicted_PS_sum_Yrs1to7 = as.numeric(predict(lo, newdata = grid)))
+
+
+p <- ggplot() +
+  geom_point(data = dat, aes(Selection, PS_sum), alpha = 0.25, size = 1) +
+  geom_line(data = pred, aes(Selection, Predicted_PS_sum_Yrs1to7), linewidth = 1) +
+  labs(
+    title = "LOESS: PS  vs Selection\nNHL Draft 2009–2018",
+    x = "Selection (overall pick number)",
+    y = "Sum of PS"
+  ) +
+  theme_minimal(base_size = 12)
+p
+```
+
+
+
+
+# GAR
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# read data
+dat_gar <- read.csv(
+  "draft_pick_wide_GAR_adjusted_2009_2018_GARsum1_7.csv",
+  stringsAsFactors = FALSE
+) |>
+  dplyr::filter(
+    !is.na(DraftYr),
+    !is.na(DraftOv),
+    !is.na(GARsum1_7)
+  ) |>
+  dplyr::arrange(DraftOv)
+
+# fit final loess model with best span
+best_span_gar <- 0.15
+
+fit_gar <- loess(
+  GARsum1_7 ~ DraftOv,
+  data = dat_gar,
+  span = best_span_gar,
+  degree = 1,
+  family = "symmetric",
+  na.action = na.exclude,
+  surface = "direct"
+)
+
+# create fitted values at observed x
+dat_gar_fit <- dat_gar |>
+  dplyr::mutate(
+    fitted = as.numeric(predict(fit_gar, newdata = dat_gar))
+  )
+
+# create a clean draft curve on all pick numbers
+pick_grid <- data.frame(
+  DraftOv = seq(min(dat_gar$DraftOv), max(dat_gar$DraftOv), by = 1)
+)
+
+curve_gar <- pick_grid |>
+  dplyr::mutate(
+    fitted = as.numeric(predict(fit_gar, newdata = pick_grid))
+  )
+
+# view first few rows
+head(curve_gar)
+
+# plot
+ggplot(dat_gar, aes(x = DraftOv, y = GARsum1_7)) +
+  geom_point(alpha = 0.5) +
+  geom_line(data = curve_gar, aes(x = DraftOv, y = fitted), linewidth = 1) +
+  labs(
+    title = "Loess Draft Curve for GARsum1_7",
+    x = "Draft Overall Pick",
+    y = "GARsum1_7"
+  ) +
+  theme_minimal()
+```
+
